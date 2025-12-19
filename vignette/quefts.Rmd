@@ -1,0 +1,483 @@
+---
+title: "QUEFTS"
+author: "Gerard H Ros"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+  # require R packages
+  require(data.table)
+  require(ggplot2)
+  require(patchwork)
+
+```
+
+## QUEFTS
+
+In 1990 Janssen et al. published the article `A system for quantitative evaluation of the fertility of tropical soils (QUEFTS)`. QUEFTS is a simple method to assess the impact of nitrogen, phosphorus and potassium inputs on crop yield, being developed for tropical soils. The system is applicable to well drained, deep soils, that have a pH(H20) in the range 4.5-7.0, and values for organic carbon, P-Olsen and exchangeable potassium below 70 g/kg, 30 mg/kg and 30 mmol/kg, respectively (0-20 cm). Soil fertility is interpreted as the capacity of a soil to provide plants with nitrogen, phosphorus and potassium, but the methodology allows for including other nutrients.
+
+The procedure consists of four successive steps. First the potential supplies of nitrogen, phosphorus and potassium are calculated, applying relationships between chemical properties of the 0-20 cm soil layer and the maximum quantity of those nutrients that can be taken up by maize, if no other nutrients and no other growth factors are yield-limiting. In the second step the actual uptake of each nutrient is calculated as a function of the potential supply of that nutrient, taking into account the potential supplies of the other two nutrients. Step 3 comprises the establishment of three yield ranges, as depending on the actual uptakes of nitrogen, phosphorus, and potassium, respectively. Next, these yield ranges are combined in pairs, and the yields estimated for pairs of nutrients are averaged to obtain an ultimate yield estimate (step 4).
+
+This vignette describes the model implementation of QUEFTS in R to support the MSc thesis work from Wen Rui.
+
+Lets first start with loading the required R packages, needed to do the simulations. We subsequently make a virtual example for a maize crop growing on a free draining sandy soil with the following properties: pH 5.3, P-Olsen 15 mg P/kg, SOC of 35 g /kg, and exchangeable potassium is 25 mmol/kg. The N, P and K dose applied is 55 kg N, 25 kg P and 40 kg K / ha.
+
+```{r load data}
+
+  # define all input variables
+   soc = 35 # in g/kg
+   pol = 15 # in mg P/kg
+   kexch = 25 # in mmol/kg
+   phw = 5.3 # no unit, pH measured in water
+   nfert = 55 # kg N /ha
+   pfert = 25 # kg P /ha
+   kfert = 40 # kg K /ha
+
+   # set maximum yield (kg /ha)
+   max_yield = 16000
+   
+  # combine all inputs in one data.table
+  dt <- data.table(id = 1,
+                   soc = soc,
+                   pols = pol,
+                   kexch = kexch,
+                   phw = phw,
+                   nfert = nfert,
+                   pfert = pfert,
+                   kfert = kfert)
+
+  # show the example
+  print(dt)
+
+```
+
+## Checking inputs
+Lets first do some checks on the inputs. This is important since the model output will be useless when the input is incorrect or when input values exceeds the acceptable input ranges for which QUEFTS has been calibrated. Below we use the `checkmate` package, that checks the values of each argument, and when it exceeds the acceptable range, then it generates a warning. If the values are ok, then the code runs smoothly, and no warning is generated.
+
+
+```{r input checks}
+
+  # check input lenght to ensure that all variables have the same length
+  arg.length <- max(length(nfert),length(pfert),length(kfert),length(soc),length(pol),length(kexch),length(phw))
+  
+  # check input of fertilizer inputs
+  checkmate::assert_numeric (nfert,lower=0,upper = 500,len = arg.length)
+  checkmate::assert_numeric(pfert,lower=0,upper = 500,len = arg.length)
+  checkmate::assert_numeric(kfert,lower=0,upper = 800,len = arg.length)
+  
+  # check input of the soil properties
+  checkmate::assert_numeric(pol,lower=0,upper = 100,len = arg.length)
+  checkmate::assert_numeric(soc,lower=0,upper = 200,len = arg.length)
+  checkmate::assert_numeric(phw,lower=3,upper = 8,len = arg.length)
+  checkmate::assert_numeric(kexch,lower=0,upper = 150,len = arg.length)
+  
+
+```
+
+## Step 1. Calculate the soil supply of N, P and K
+
+The empirical equations to estimate the soil nutrient supply are given below. The potential supply of each of the nutrients nitrogen, phosphorus, and potassium proved related to pH but in different ways. This is expressed in the correction factors fN, fP and fK. For convenience the coefficients were chosen in such a way that fN, fP and fK have values between 0 and 1, and for pH (H20) ranging from 4.5 to 7. The potential supply of nitrogen increases with increasing pH, corresponding with an increase in mineralization rate. From these equations it follows that the supply of nitrogen per growing season equals 2.72, 2.04, and 1.36% of total organic nitrogen in the topsoil (0-20 cm), at pH(H20) values of 7, 6, and 5, respectively. 
+
+The expression for fP is parabolic, showing an optimum at pH 6 and zero values for pH 4.6 and 7.4.Between pH 5.5 and 6.5, the correction fP is more than 0.875, indicating a rather wide range of a relatively high availability of phosphorus. The potential supply of potassium is negatively related to pH and organic carbon content. The main reason probably is that increasing pH or increasing organic carbon content causes the effective CEC to increase as well. Hence, given a certain amount of exchangeable potassium, the relative potassium saturation decreases, so that potassium is less available to plants. Higher values of CEC are also brought about by an increase in clay content. Because carbon and clay contents are usually positively correlated, only organic carbon is included in the empirical correction factor. 
+
+Note that the model uses SOC as input for the pH correction for P supply. This was done as a substitute for total P that is seldom determined. Note that the paper of Janssen (1990) also gives empirical functions to estimate the P supply from total P as input parameter.
+
+
+```{r calc soil supply}
+
+  # estimate pH correction factors, so that within 0-1 range (Janssen, 1998)
+  dt[,fphn := pmin(1,pmax(0,0.25 * (phw - 3)))]
+  dt[,fphp := pmin(1,pmax(0,1 - 0.5 * (phw-6)^2))]
+  dt[,fphk := pmin(1,pmax(0,0.625 * (3.4 - 0.4 * phw)))]
+    
+  
+  # to illustrate the response of pH on the supply of the nutrients, we make a test example where we apply those equatiosn
+  dt.plot <- data.table(phw = seq(4.5,7,0.1))
+  dt.plot[,fphn := pmin(1,pmax(0,0.25 * (phw - 3)))]
+  dt.plot[,fphp := pmin(1,pmax(0,1 - 0.5 * (phw-6)^2))]
+  dt.plot[,fphk := pmin(1,pmax(0,0.625 * (3.4 - 0.4 * phw)))]
+  
+  # melt the table to allow easy plotting
+  dt.plot <- melt(dt.plot,id.vars='phw',variable.name = 'cf')
+  
+  # plot the relationships
+  p1 <- ggplot(data = dt.plot,aes(x=phw,y=value,colour = cf)) + 
+        geom_line() + theme_bw() + theme(legend.position = 'inside') +
+        xlab('pH-water') + ylab('correction factor')+
+        ggtitle('Effect of pH on potential supply of NPK')
+  p1
+  
+  # estimate the soil nutrient supply
+  dt[, sn := fphn * 6.8 * soc]
+  dt[, sp := fphp * 0.35 * soc + 0.5 * pols]
+  dt[, sk := fphk * 400 * kexch / (2 + 0.9 * soc)]
+
+  # print how much NPK is supplied
+  print(paste0('the soil N supply is estimated at', round(dt$sn),' kg N/ha.'))
+  print(paste0('the soil P supply is estimated at', round(dt$sp),' kg P/ha.'))
+  print(paste0('the soil K supply is estimated at', round(dt$sk),' kg K/ha.'))
+
+```
+
+## Step 2. Calculate the potential supply and actual uptake
+
+The relationships between the potential supply and the actual uptake of a nutrient were based on the following considerations. The nutrients are first compared in pairs. Thus, the relation between the actual uptake and the potential supply of nitrogen is calculated twice: as depending on the potential supply of phosphorus and as depending on the potential supply of potassium. Likewise, the actual uptake of phosphorus is calculated as depending on the potential supplies of nitrogen and potassium, and that of potassium as depending on the potential supplies of nitrogen and phosphorus. This results in two estimates of the actual uptake for each of the three nutrients. The lower of the two estimates is considered the more realistic, in conformity with the law of the minimum. 
+
+In QUEFTS the crop uptake is driven by four crop parameters: a, d, r and maximum yield. These are defined as follows:
+• The so-called `d` parameter represents the slope of the relationship between marketable yield (e.g., grain) as a function of total (grain + straw) crop nutrient uptake where the nutrient is maximally diluted in the plant. It is expressed in kg yield dry matter (per ha) divided by kg total uptake of the nutrient (per ha) (kg / kg).
+• The so-called `a` parameter represents the slope of the relationship between marketable yield (e.g., grain) as a function of total (grain + straw) crop nutrient uptake where the nutrient is maximally accumulated in the plant. It is expressed in kg yield dry matter (per ha) divided by kg total uptake of the nutrient (per ha) (kg / kg).
+• The minimum or residual nutrient uptake required to produce any marketable yield is the `r` parameter. It is expressed in kg total uptake of the nutrient per ha (kg / ha). Often this value is small, or even neglected (i.e., r = 0).
+• The parameters `a`, `d` and `r` must be known for each nutrient (e.g., N, P, K). In addition, QUEFTS makes use of a maximum possible yield, which is only used to prevent unrealistic high predictions. This maximum yield can be seen as a physiological maximum possible yield.
+
+In QUEFTS, the interaction between any pair of nutrients is taken into account when calculating the actual uptake of nutrients.
+For each nutrient several estimates of U are obtained, for which the minimum value will be used in the remainder of the calculations (cf. Liebig’s law of the minimum).
+
+```{r calc soil supply and uptake}
+
+  # get quefts coefficients for a maize crop
+  parms_quefts <- data.table(aN = 34,aP = 190,aK = 38,
+                             dN = 77,dP = 613,dK = 175,
+                             rN = 5,rP = 0.4,rK = 2,
+                             CN = 111,CP = 803,CK = 213,
+                             sN = 1,sP = 1,sK = 1)
+
+  # which nutrients are used 
+  nuts=c('N','P','K')
+  
+  # make a data.table with all combinations to assess the interaciton effects of any pair of nutrients
+  # add column names for nutrient 1 (n1) and nutrient 2 (n2)
+  o1 <- utils::combn(nuts, 2)
+  o1 <- as.data.table(t(cbind(o1, o1[c(2,1),])), stringsAsFactors = FALSE)
+  colnames(o1) <- c('n1', 'n2')
+  
+  # add QUEFTS properties to data.table for each pair of nutrients
+  o1[, a1 := as.numeric(parms_quefts[,mget(paste0('a',n1))])]
+  o1[, d1 := as.numeric(parms_quefts[,mget(paste0('d',n1))])]
+  o1[, r1 := as.numeric(parms_quefts[,mget(paste0('r',n1))])]
+  o1[, a2 := as.numeric(parms_quefts[,mget(paste0('a',n2))])]
+  o1[, d2 := as.numeric(parms_quefts[,mget(paste0('d',n2))])]
+  o1[, r2 := as.numeric(parms_quefts[,mget(paste0('r',n2))])]
+       
+  # set an unique ID per combination of inputs (soil and fertilizer supply)
+  dt[,id:=.I]
+  
+  # calculate the total nutrient input (in kg/ha)
+  dt[, N := sn + nfert]
+  dt[, P := sp + pfert]
+  dt[, K := sk + kfert]
+  
+  # reformat the input table 
+  dt <- melt(dt,
+             id.vars='id',
+             measure.vars=nuts,
+             variable.name='n1',
+             value.name='s1')
+  
+  # enumerate quefts parameter set with all 2-way interactions for each site
+  o2 = o1[rep(1:nrow(o1),nrow(dt)),]
+  o2[,id := sort(rep(min(dt$id):max(dt$id),3 * nrow(o1)))]
+  setkey(o2,id,n1,n2)
+  setkey(dt,id,n1)
+  
+  # left_join with element n1 and n2 to ensure that all QUEFTS parameters are connected to each pair of nutrients
+  o2[dt,on=.(id,n1),s2:=s1]
+  o2=o2[dt,on=c(id='id',n2='n1'),nomatch=0L]
+  setnames(o2,names(o2),c(names(o2)[1:9],'s1','s2'))
+  
+  # First define a helper function to estimate the nutrient uptake given the interactions between nutrient 1 and nutrient 2
+  qnup = function(a1,d1,r1,s1,a2,d2,r2,s2){
+
+    ou = pmax(ifelse(s1 < r1 + (s2 - r2)*a2/d1,  s1,
+                     ifelse(s1 > r1 + (s2 - r2)*(2*(d2/a1) - a2/d1), r1 + (s2 - r2)*(d2/a1),
+                            s1 - ((0.25*(s1 - r1 - (s2 - r2)*(a2/d1))^2)/((s2 - r2)*(d2/a1 - a2/d1))))),0)
+         return(ou)}
+  
+  
+  # calculate for each soil the uptake for combinations of nutrients
+  o2[, uptake := qnup(a1,d1,r1,s1+0.001,a2,d2,r2,s2+0.001)]
+  
+  # calculate the minimum of two-pair interactions
+  o2[,upt1 := min(uptake),by=list(id,n1)]
+  
+  # add minimum yield corresponding to second nutrient (necessary for calculation YA and YD later)
+  o2[o2[,c('id','n1','upt1')],on=c(id='id',n2='n1'),upt2 := i.upt1]
+  up = dcast(o2,id~n1,value.var='upt1',fun.aggregate=mean)
+  
+  # show the minimum yield based on the availability of nutrient 
+  print(up)
+  
+```       
+
+
+## Step 3. Calcualting actual uptake and yield ranges
+
+Yield ranges corresponding with the actual uptake of nitrogen, phosphorus and potassium can subsequently be calculated. The maximum yield for all the sites can be set as variable, but in this case it is set at 12000 kg/ha (being defined in the start of this vignette).
+
+```{r calc yield per nutrient}
+
+  # first define a helper function to quantify the yield (kg/ha) at accumulation (YA.) and dilution (YD.) per nutrient
+  # inputs include the nutrient name for each pair (n1 and n2), the uptake for nutrient 2 and nutrient 1, and the quefts crop parameters (qp)
+  qYAYD <- function(n1,n2,upt2,upt1,qp=inpc){
+  
+    inpc = NULL
+  
+    # select only relevant quefts parameters
+    qp = unlist(qp[,grepl('^a|^d|^r',colnames(qp))])
+   
+    # calculate yields at acummulation (YA) and dilution (YD) per nutrient
+    YA = qp[paste0('a',n2)] * pmax(upt2 - qp[paste0('r',n2)],0)
+    YD = qp[paste0('d',n2)] * pmax(upt2 - qp[paste0('r',n2)],0)
+    a1 = qp[paste0('a',n1)]
+    d1 = qp[paste0('d',n1)]
+    r1 = qp[paste0('r',n1)]
+
+    # calculate maximum yields
+    YL = qp[paste0('d',n1)] * pmax(upt1 - qp[paste0('r',n1)],0)
+
+    # combine output and return
+    ou = list(YA=YA,YD=YD,YL=YL,a1=a1,d1=d1,r1=r1)
+    return(ou)
+  }
+
+  # helper function 2: calculate the yield per pair of nutrients
+  qYpNpair <- function(upt1,YD,YA,a1,d1,r1,YL){
+
+    # select only relevant quefts parameters
+    yield = pmin(YL,ifelse(YA > 0, YA + (2*(YD - YA)* (upt1 - r1 - YA/d1))/(YD/a1 - YA/d1) -
+                             ((YD - YA)*(upt1 - r1 - YA/d1)^2)/((YD/a1 - YA/d1)^2), 0))
+  
+            return(yield)
+    }
+
+  # calculate yields at accumulation (YA.) and dilution (YD.) per nutrient
+  o2[,c('YA','YD','YL','a1','d1','r1'):= qYAYD(n1,n2,upt2,upt1,qp=as.data.frame(parms_quefts))]
+  
+  # set internal table with maximal yields per field
+  dt.ym <- data.table(id = 1:arg.length,YM = max_yield)
+  
+  # merge table with maximal yields per field
+  o2 <- merge(o2,dt.ym, by = 'id')
+  
+  # calculate maximum yield, and yield per pair of nutrients
+  # where yield can not exceed the maximum
+  o2[,c('YL'):= list(round(min(YL,YM))),by=id][,c('yield'):=list(qYpNpair(upt1,YD,YA,a1,d1,r1,YL))]
+  
+  # print the yield and uptake for one option as example
+  print(o2[1,.(id,n1,n2,uptake,yield,YA,YD,YM)])
+```
+
+
+## Step 4. Combining yield ranges to one yield estimate
+
+The ultimate yield estimate (YE) is obtained by averaging all yields for paired nutrients. An important condition should be fulfilled, however, in that the yield calculated for any combination of two nutrients may not exceed the upper limit of the yield range of the third nutrient or any other yield limit that might result from other growth factors.
+
+
+```{r calc yield mean}
+
+  # the final yield the average of all pair-estimates
+  y1 <- o2[,list(yield=mean(yield,na.rm=TRUE)),by=id]
+  
+  # merge the predicted yield with the predicted nutrient uptake, and update the names
+  y1 <- y1[up,on='id']
+  setnames(y1,names(y1),ifelse(names(y1) %in% nuts,paste0('u',names(y1)),names(y1)))
+
+  # print the yield and uptake
+  print(y1)
+
+```
+
+
+## the full QUEFTS function
+
+Below the full calculation is combined into one function called `s2p_calc_quefts`. 
+
+```{r calc quefts}
+
+#' The QUEFTS model
+#'
+#' This function contains the QUEFTS model for NPK
+#'
+#' @param nin (numeric) the effective nitrogen input (kg N/ha) from soil and fertilizer
+#' @param pin (numeric) the effective phosphorus input (kg P/ha) from soil and fertilizer
+#' @param kin (numeric) the effective potassium input (kg K/ha) from soil and fertilizer
+#' @param soc (numeric) the soil organic carbon content (g / kg)
+#' @param pol (numeric) the Olsen-P content (mg P/kg)
+#' @param phw (numeric) the soil pH measured in water
+#' @param kexch (numeric) the exchangeable potassium content (mmol / kg)
+#' @param max_yield (integer) the maximal attainable yield (kg / ha)
+#'
+#'@export
+s2p_calc_quefts <- function(nin,pin,kin, soc, pol, phw,kexch, max_yield){
+  
+  # Visual bindings
+  a1 = n1 = d1 = r1 = s1 = a2 = n2 = d2 = r2 = s2 = id = uptake = upt1 = upt2 = i.upt1 = YL = YD = YA = YM = yield = . = NULL
+  
+  # check input lenght
+  arg.length <- max(length(nin),length(pin),length(kin),length(soc),length(pol),length(kexch),length(phw))
+  
+  # check input
+  checkmate::assert_numeric(nin,lower=0,upper = 500,len = arg.length)
+  checkmate::assert_numeric(pin,lower=0,upper = 500,len = arg.length)
+  checkmate::assert_numeric(kin,lower=0,upper = 800,len = arg.length)
+  checkmate::assert_numeric(pol,lower=0,upper = 100,len = arg.length)
+  checkmate::assert_numeric(soc,lower=0,upper = 200,len = arg.length)
+  checkmate::assert_numeric(phw,lower=3,upper = 8,len = arg.length)
+  checkmate::assert_numeric(kexch,lower=0,upper = 150,len = arg.length)
+  
+  # which QUEFTS nutrients are used as input
+  nuts=c('N','P','K')
+  
+  # all combinations
+  o1 <- utils::combn(nuts, 2)
+  o1 <- as.data.table(t(cbind(o1, o1[c(2,1),])), stringsAsFactors = FALSE)
+  colnames(o1) <- c('n1', 'n2')
+  
+  # Select quefts parameters for crop and management level
+  parms_quefts <- data.table(aN = 34,aP = 190,aK = 38,
+                             dN = 77,dP = 613,dK = 175,
+                             rN = 5,rP = 0.4,rK = 2,
+                             CN = 111,CP = 803,CK = 213,
+                             sN = 1,sP = 1,sK = 1)
+  
+  # add QUEFTS properties to data.table
+  o1[, a1 := as.numeric(parms_quefts[,mget(paste0('a',n1))])]
+  o1[, d1 := as.numeric(parms_quefts[,mget(paste0('d',n1))])]
+  o1[, r1 := as.numeric(parms_quefts[,mget(paste0('r',n1))])]
+  o1[, a2 := as.numeric(parms_quefts[,mget(paste0('a',n2))])]
+  o1[, d2 := as.numeric(parms_quefts[,mget(paste0('d',n2))])]
+  o1[, r2 := as.numeric(parms_quefts[,mget(paste0('r',n2))])]
+  
+  # estimate total nutrient inputs from fertilizer and soil supply of nutrients (in kg / ha)
+  dt0 <- data.table(soc = soc,pols = pol,kexch = kexch, phw = phw,
+                    N = nin,P = pin,K = kin)
+  
+    # estimate pH correction factors, so that within 0-1 range (Janssen, 1998)
+    dt0[,fphn := pmin(1,pmax(0,0.25 * (phw - 3)))]
+    dt0[,fphp := pmin(1,pmax(0,1 - 0.5 * (phw-6)^2))]
+    dt0[,fphk := pmin(1,pmax(0,0.625 * (3.4 - 0.4 * phw)))]
+    
+    # estimate the soil nutrient supply
+    dt0[, sn := fphn * 6.8 * soc]
+    dt0[, sp := fphp * 0.35 * soc + 0.5 * pols]
+    dt0[, sk := fphk * 400 * kexch / (2 + 0.9 * soc)]
+    
+    # calculate the total nutrient input (in kg/ha)
+    dt0[, N := sn + N]
+    dt0[, P := sp + P]
+    dt0[, K := sk + K]
+  
+  # set an unique ID per combination of inputs
+  dt0[,id:=.I]
+  
+  # set internal table with maximal yields per field
+  dt.ym <- data.table(id = unique(dt0$id),YM = max_yield)
+  
+  # spread the data.table with input data for joining purposes later
+  dt <- melt(dt0,
+             id.vars='id',
+             measure.vars=nuts,
+             variable.name='n1',
+             value.name='s1')
+  
+  # enumerate quefts parameter set with all 2-way interactions for each grid cel
+  o2 = o1[rep(1:nrow(o1),nrow(dt)),]
+  o2[,id := sort(rep(min(dt$id):max(dt$id),3 * nrow(o1)))]
+  setkey(o2,id,n1,n2)
+  setkey(dt,id,n1)
+  
+  # left_join with element n1 and n2
+  o2[dt,on=.(id,n1),s2:=s1]
+  o2=o2[dt,on=c(id='id',n2='n1'),nomatch=0L]
+  setnames(o2,names(o2),c(names(o2)[1:9],'s1','s2'))
+  
+  # calculate for each soil the uptake for combinations of nutrients, and then the minimum of two-pair interactions
+  o2[, uptake := qnup(a1,d1,r1,s1+0.001,a2,d2,r2,s2+0.001)][,upt1 := min(uptake),by=list(id,n1)]
+  
+  # add minimum yield corresponding to second nutrient (necessary for calculation YA and YD later)
+  o2[o2[,c('id','n1','upt1')],on=c(id='id',n2='n1'),upt2 := i.upt1]
+  up = dcast(o2,id~n1,value.var='upt1',fun.aggregate=mean)
+  
+  # calculate yields at accumulation (YA.) and dilution (YD.) per nutrient (DELAYING)
+  o2[,c('YA','YD','YL','a1','d1','r1'):= qYAYD(n1,n2,upt2,upt1,qp=as.data.frame(parms_quefts))]
+  
+  # merge table with maximal yields per field
+  o2 <- merge(o2,dt.ym, by = 'id',all.x = TRUE)
+  
+  # calculate maximum yield, and yield per pair of nutrients
+  o2[,c('YL'):= list(round(min(YL,YM))),by=id][,c('yield'):=list(qYpNpair(upt1,YD,YA,a1,d1,r1,YL))]
+  
+  # y1 equals the average of all pair-estimates
+  y1 <- o2[,list(yield=mean(yield,na.rm=TRUE)),by=id]
+  
+  # merge with the estimated nutrient uptake
+  y1 <- y1[up,on='id']
+  setnames(y1,names(y1),ifelse(names(y1) %in% nuts,paste0('u',names(y1)),names(y1)))
+  
+  # add the given input dose
+  y1 = y1[dt0,on='id']
+  
+  return(y1)
+}
+
+
+
+```
+
+
+
+## illustration of the full QUEFTS crop prediciton function
+
+Below we illustrate an example how QUEFTS function can be used. This is done for a single test case with one soil and one fertilizer practice (fixed N, P and K dose). Second, we illustrate this for a single soil with various N inputs and a fixed P and K input.
+
+
+```{r illustrate quefts,out.width="100%",}
+
+  # test the function for one soil
+  test = s2p_calc_quefts(nin = 100,pin = 25,kin = 85, soc = 15, pol = 35, phw = 4.9,kexch = 45, max_yield = 20000)
+  
+  # test the function for one soil with varying N inputs
+  dt.test <- data.table(id = 1,
+                        soc = 10,
+                        pol = 8,
+                        kexch = 14,
+                        phw = 4.8,
+                        nfert = seq(0,400,10),
+                        pfert = 25,
+                        kfert = 105)
+
+  # run test 2
+  test2 <- s2p_calc_quefts(nin = dt.test$nfert,
+                           pin = dt.test$pfert,
+                           kin = dt.test$kfert, 
+                           soc = dt.test$soc, 
+                           pol = dt.test$pol, 
+                           phw = dt.test$phw,
+                           kexch = dt.test$kexch, 
+                           max_yield = 20000)
+  
+  # plot the yield
+  p1 <- ggplot(data=test2,aes(y=yield*0.001,x=N)) + geom_point()+ theme_bw() + 
+        ggtitle(label = 'Yield',subtitle = 'response to N by fixed P and K') +
+        xlab('N dose (kg/ha)') + ylab('yield (ton/ha)')
+  
+  # plot the nutrient uptake
+  p2 <- ggplot(data=test2,aes(y=uN,x=N)) + geom_point()+ theme_bw() + 
+        ggtitle(label = 'N uptake', subtitle = 'response to N by fixed P and K') +
+        xlab('N dose (kg/ha)') + ylab('N uptake (kg/ha)')
+  p3 <- ggplot(data=test2,aes(y=uP,x=N)) + geom_point()+ theme_bw() + 
+        ggtitle(label = 'P uptake',subtitle = 'with various N and fixed K') +
+        xlab('N dose (kg/ha)') + ylab('P uptake (kg/ha)')
+
+  # combine plots
+  p4 <- p1 + p2 + p3
+  
+  # show plot
+  print(p4)
+```
+
+
+
+
