@@ -17,7 +17,7 @@
 #'
 #'
 #'@export
-s2p_calc_quefts <- function(nin,pin,kin, country, crop, management_level, max_yield, qwf = 2){
+s2p_calc_quefts <- function(nin,pin,kin, soc, pol, phw,kexch,country, crop, management_level, max_yield, qwf = 2){
   
   # Visual bindings
   Country = Crop = Management = a1 = n1 = d1 = r1 = s1 = a2 = n2 = d2 = r2 = s2 = id = uptake = upt1 = upt2 = i.upt1 = YL = YD = YA = YM = yield = . = NULL
@@ -43,7 +43,8 @@ s2p_calc_quefts <- function(nin,pin,kin, country, crop, management_level, max_yi
   colnames(o1) <- c('n1', 'n2')
   
   # Select quefts parameters for crop and management level
-  parms_quefts <- S2P::parms_quefts[Country == country & Crop == crop & Management == management_level]
+  parms_quefts <- fread('D:/ESA/03 msc projects/26 wen rui/msc_wen/data/parms_quefts.csv')
+  parms_quefts <- parms_quefts[Country == country & Crop == crop & Management == management_level]
   
   # add QUEFTS properties to data.table
   o1[, a1 := as.numeric(parms_quefts[,mget(paste0('a',n1))])]
@@ -53,26 +54,31 @@ s2p_calc_quefts <- function(nin,pin,kin, country, crop, management_level, max_yi
   o1[, d2 := as.numeric(parms_quefts[,mget(paste0('d',n2))])]
   o1[, r2 := as.numeric(parms_quefts[,mget(paste0('r',n2))])]
   
-  # estimate soil supply of nutrients
-  dsoil <- data.table(corg = corg,pols = pols,kexch = kexch, phw = phw)
+  # estimate total nutrient inputs from fertilizer and soil supply of nutrients (in kg / ha)
+  dt0 <- data.table(corg = corg,pols = pol,kexch = kexch, phw = phw,
+                    N = nin,P = pin,K = kin)
   
     # estimate pH correction factors, so that within 0-1 range (Janssen, 1998)
-    dsoil[,fphn := pmin(1,pmax(0,0.25 * (phw - 3)))]
-    dsoil[,fphp := pmin(1,pmax(0,1 - 0.5 * (phw-6)^2))]
-    dsoil[,fphk := pmin(1,pmax(0,0.625 * (3.4 - 0.4 * phw)))]
+    dt0[,fphn := pmin(1,pmax(0,0.25 * (phw - 3)))]
+    dt0[,fphp := pmin(1,pmax(0,1 - 0.5 * (phw-6)^2))]
+    dt0[,fphk := pmin(1,pmax(0,0.625 * (3.4 - 0.4 * phw)))]
     
     # estimate the soil nutrient supply
-    dsoil[]
+    dt0[, sn := fphn * 6.8 * soc]
+    dt0[, sp := fphp * 0.35 * soc + 0.5 * pols]
+    dt0[, sk := fphk * 400 * kexch / (2 + 0.9 * soc)]
     
-  # set internal data.table with the NPK input (kg / ha)
-  dt0 <- data.table(N = nin,P = pin,K = kin)
-  
   # set internal table with maximal yields per field
   dt.ym <- data.table(YM = max_yield)
   
   # set an unique ID per combination of inputs
   dt0[,id:=.I]
   dt.ym[,id := .I]
+  
+  # calculate the total nutrient input (in kg/ha)
+  dt0[, N := sn + N]
+  dt0[, P := sp + P]
+  dt0[, K := sk + K]
   
   # spread the data.table with input data for joining purposes later
   dt <- melt(dt0,
@@ -247,4 +253,92 @@ qFindNutReq <- function(inp,inp2,nuts,qdb1,qyield){
   qm <- inp[qm,on=.(field_id,tyield_scaled)]
 
   return(qm)
-  }
+}
+
+
+
+
+#' sub-function to calculate nutrient uptake given interactions
+#'
+#'
+#' @param a1 (numeric) QUEFTS accumulation parameter for nutrient 1
+#' @param d1 (numeric) QUEFTS dilution parameter for nutrient 1
+#' @param r1 (numeric) QUEFTS ... parameter for nutrient 1
+#' @param s1 (numeric) QUEFTS ... parameter for nutrient 1
+#' @param a2 (numeric) QUEFTS accumulation parameter for nutrient 2
+#' @param d2 (numeric) QUEFTS dilution parameter for nutrient 2
+#' @param r2 (numeric) QUEFTS ... parameter for nutrient 2
+#' @param s2 (numeric) QUEFTS ... parameter for nutrient 2
+#'
+#'
+#' @export
+qnup = function(a1,d1,r1,s1,a2,d2,r2,s2){
+  
+  ou = pmax(ifelse(s1 < r1 + (s2 - r2)*a2/d1,  s1,
+                   ifelse(s1 > r1 + (s2 - r2)*(2*(d2/a1) - a2/d1), r1 + (s2 - r2)*(d2/a1),
+                          s1 - ((0.25*(s1 - r1 - (s2 - r2)*(a2/d1))^2)/((s2 - r2)*(d2/a1 - a2/d1))))),0)
+  return(ou)}
+
+#' calculate yields at accumulation (YA.) and dilution (YD.) per nutrient
+#'
+#'
+#' @param n1 (character) Nutrient 1
+#' @param n2 (character) Nutrient 2
+#' @param upt2 (nimeric) Uptake nutrient 2
+#' @param upt1 (numeric) Uptake nutrietn 1
+#' @param qp (data.frame) QUEFTS parameters
+#'
+#'
+#' @export
+qYAYD <- function(n1,n2,upt2,upt1,qp=inpc){
+  
+  inpc = NULL
+  
+  # select only relevant quefts parameters
+  qp = unlist(qp[,grepl('^a|^d|^r',colnames(qp))])
+  # qp = parms_quefts[, .SD, .SDcols = patterns("^[adr]")]
+  
+  # calculate yields at acummulation (YA) and dilution (YD) per nutrient
+  YA = qp[paste0('a',n2)] * pmax(upt2 - qp[paste0('r',n2)],0)
+  YD = qp[paste0('d',n2)] * pmax(upt2 - qp[paste0('r',n2)],0)
+  a1 = qp[paste0('a',n1)]
+  d1 = qp[paste0('d',n1)]
+  r1 = qp[paste0('r',n1)]
+  # YA = qp[,mget(paste0('a',n2))] * pmax(upt2 - qp[,mget(paste0('r',n2))],0)
+  # YD = qp[,mget(paste0('d',n2))] * pmax(upt2 - qp[,mget(paste0('r',n2))],0)
+  # a1 = qp[,mget(paste0('a',n1))]
+  # d1 = qp[,mget(paste0('d',n1))]
+  # r1 = qp[,mget(paste0('r',n1))]
+  
+  
+  # calculate maximum yields
+  YL = qp[paste0('d',n1)] * pmax(upt1 - qp[paste0('r',n1)],0)
+  # YL = qp[,mget(paste0('d',n1))] * pmax(upt1 - qp[,mget(paste0('r',n1))],0)
+  
+  # combine output and return
+  ou = list(YA=YA,YD=YD,YL=YL,a1=a1,d1=d1,r1=r1)
+  return(ou)
+}
+
+
+#' Calculate yield per pair of nutrients
+#'
+#'
+#' @param upt1 (numeric) Uptake nutrient 1
+#' @param YD (numeric) Yields at dilution
+#' @param YA (numeric) Yields at accumulation
+#' @param a1 (numeric) QUEFTS accumulation parameter for nutrient 1
+#' @param d1 (numeric) QUEFTS dilution parameter for nutrient 1
+#' @param r1 (numeric) QUEFTS ... parameter for nutrient 1
+#' @param YL (numeric) Yields at accumulation
+#'
+#'
+#' @export
+qYpNpair <- function(upt1,YD,YA,a1,d1,r1,YL){
+  
+  # select only relevant quefts parameters
+  yield = pmin(YL,ifelse(YA > 0, YA + (2*(YD - YA)* (upt1 - r1 - YA/d1))/(YD/a1 - YA/d1) -
+                           ((YD - YA)*(upt1 - r1 - YA/d1)^2)/((YD/a1 - YA/d1)^2), 0))
+  
+  return(yield)
+}

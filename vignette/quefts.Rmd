@@ -479,5 +479,7 @@ Below we illustrate an example how QUEFTS function can be used. This is done for
 ```
 
 
+Since the functions are all in the R script `s2p_quefts.R` you can load them in your environment by the command `source('scripts/s2p_quefts.R')`. 
+
 
 
