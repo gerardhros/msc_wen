@@ -17,7 +17,7 @@
 #'
 #'
 #'@export
-s2p_calc_quefts <- function(nin,pin,kin, soc, pol, phw,kexch,country, crop, management_level, max_yield, qwf = 2){
+s2p_calc_quefts <- function(nin,pin,kin, soc, pol, phw,kexch,country = 'Uganda', crop = 'Maize', management_level = 'High', max_yield, qwf = 2){
   
   # Visual bindings
   Country = Crop = Management = a1 = n1 = d1 = r1 = s1 = a2 = n2 = d2 = r2 = s2 = id = uptake = upt1 = upt2 = i.upt1 = YL = YD = YA = YM = yield = . = NULL
